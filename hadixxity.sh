@@ -76,6 +76,7 @@ Options:
       --delay SEC    Fixed delay (supports decimals) inserted before network requests
       --random-delay MIN:MAX
                      Random delay (supports decimals) between MIN and MAX seconds
+      --httpx-final  Run httpx over the merged subdomain inventory at the end
   -f, --config       Path to env file with API keys (default: ./.hadixxity.env)
   -h, --help         Show this help
 
@@ -137,6 +138,8 @@ USE_RANDOM_UA=0
 DELAY_FIXED=""
 DELAY_MIN=""
 DELAY_MAX=""
+RUN_FINAL_HTTPX=0
+RUN_FINAL_HTTPX=0
 
 # ---------- Helpers ----------
 need_cmd(){
@@ -146,6 +149,22 @@ need_cmd(){
 ensure_file(){
   local file="$1"
   [[ -f "$file" ]] || : > "$file"
+}
+
+normalize_host(){
+  local host="${1,,}"
+  host="${host#http://}"
+  host="${host#https://}"
+  host="${host#*://}"
+  host="${host%%/*}"
+  host="${host%%:*}"
+  echo "${host}"
+}
+
+append_file_contents(){
+  local src="$1"
+  local dest="$2"
+  [[ -f "$src" ]] && cat "$src" >> "$dest"
 }
 
 is_positive_float(){
@@ -307,6 +326,40 @@ ensure_shodan_ready(){
   if ((shodan_ready == 0)); then
     warn "Shodan CLI is not authenticated. Set SHODAN_API_KEY or run 'shodan init <KEY>'. Disabling Shodan module."
     USE_SHODAN=0
+  fi
+}
+
+ensure_pd_provider_config(){
+  [[ -n "${PROJECTDISCOVERY_API_KEY}" ]] || return 0
+  local conf="${HOME}/.config/subfinder/provider-config.yaml"
+  local conf_dir
+  conf_dir="$(dirname "${conf}")"
+  mkdir -p "${conf_dir}"
+
+  if [[ ! -f "${conf}" ]]; then
+    cat <<EOF > "${conf}"
+binary:
+  projectdiscovery-cloud:
+    api_key: "${PROJECTDISCOVERY_API_KEY}"
+# Add other providers below if needed. See https://github.com/projectdiscovery/subfinder for structure.
+EOF
+    ok "Created ${conf} with ProjectDiscovery Cloud API key."
+    return 0
+  fi
+
+  if grep -q "projectdiscovery-cloud" "${conf}"; then
+    if grep -A 2 "projectdiscovery-cloud" "${conf}" | grep -q "${PROJECTDISCOVERY_API_KEY}"; then
+      return 0
+    fi
+    warn "Update ${conf} -> projectdiscovery-cloud.api_key with your PROJECTDISCOVERY_API_KEY to avoid provider warnings."
+  else
+    cat <<EOF >> "${conf}"
+
+binary:
+  projectdiscovery-cloud:
+    api_key: "${PROJECTDISCOVERY_API_KEY}"
+EOF
+    ok "Appended projectdiscovery-cloud entry to ${conf}."
   fi
 }
 
@@ -953,6 +1006,84 @@ run_auto_apex_pipeline(){
   subfinder_httpx_loop "${AUTO_APEX_FILE}" "auto-discovered apex list"
 }
 
+collect_subdomains(){
+  local combined="${REPORTS_DIR}/subdomains.txt"
+  local tmp="${combined}.tmp"
+  : > "${tmp}"
+  for domain in "${TARGET_DOMAINS[@]}"; do
+    append_file_contents "${CT_DIR}/${domain}.subdomains.txt" "${tmp}"
+    append_file_contents "${SNI_DIR}/${domain}.sni-hosts.txt" "${tmp}"
+  done
+
+  if compgen -G "${NOTES_DIR}/apex-httpx/"'*.httpx.txt' >/dev/null 2>&1; then
+    for file in "${NOTES_DIR}/apex-httpx/"*.httpx.txt; do
+      [[ -f "$file" ]] || continue
+      awk '{print $1}' "${file}" | while read -r url; do
+        local host
+        host=$(normalize_host "$url")
+        [[ -n "$host" ]] && echo "$host" >> "${tmp}"
+      done
+    done
+  fi
+
+  if [[ -s "${tmp}" ]]; then
+    sort -u "${tmp}" > "${combined}"
+    ok "[PHASE 8] Subdomain inventory merged at ${combined}"
+  else
+    : > "${combined}"
+    info "[PHASE 8] No subdomains collected yet."
+  fi
+  rm -f "${tmp}"
+}
+
+resolve_subdomains_to_ips(){
+  local subs="${REPORTS_DIR}/subdomains.txt"
+  [[ -s "${subs}" ]] || { info "[PHASE 8] Skipping subdomain resolution (no inventory)."; return 0; }
+  local out="${REPORTS_DIR}/subdomains-resolved.tsv"
+  declare -A seen
+  echo -e "subdomain\trecord\tvalue" > "${out}"
+  while read -r sub; do
+    sub="${sub//[$'\t\r\n ']/}"
+    [[ -z "$sub" ]] && continue
+    (( seen["$sub"] )) && continue
+    seen["$sub"]=1
+    local record_found=0
+    while read -r ip; do
+      [[ -z "$ip" ]] && continue
+      echo -e "${sub}\tA\t${ip}" >> "${out}"
+      record_unique_line "${ALL_IPS_FILE}" "${ip}"
+      record_found=1
+    done < <(dig +short "${sub}" A 2>/dev/null)
+    while read -r ip6; do
+      [[ -z "$ip6" ]] && continue
+      echo -e "${sub}\tAAAA\t${ip6}" >> "${out}"
+      record_unique_line "${ALL_IPS_FILE}" "${ip6}"
+      record_found=1
+    done < <(dig +short "${sub}" AAAA 2>/dev/null)
+    (( record_found )) || echo -e "${sub}\t-\t-" >> "${out}"
+  done < "${subs}"
+  ok "[PHASE 8] Subdomain resolution stored in ${out}"
+}
+
+final_httpx_scan(){
+  (( RUN_FINAL_HTTPX )) || return 0
+  local subs="${REPORTS_DIR}/subdomains.txt"
+  [[ -s "${subs}" ]] || { warn "[PHASE 10] --httpx-final requested but no subdomains were found."; return 0; }
+  if ! command -v httpx >/dev/null 2>&1; then
+    warn "[PHASE 10] httpx not found; cannot run final scan."
+    return 0
+  fi
+  info "[PHASE 10] Running httpx across consolidated subdomains"
+  local out="${REPORTS_DIR}/subdomains-httpx.txt"
+  local httpx_cmd=(httpx -l "${subs}" -H "User-Agent: ${CUSTOM_USER_AGENT}" -status-code -title -content-length -web-server -asn -location -no-color -follow-redirects -o "${out}" -t 50)
+  (( USE_RANDOM_UA )) && httpx_cmd+=(-random-agent)
+  if ! "${httpx_cmd[@]}"; then
+    warn "[PHASE 10] Final httpx scan failed. See ${out} (if generated)."
+    return 0
+  fi
+  ok "[PHASE 10] Final httpx results stored in ${out}"
+}
+
 # ---------- Phase 9: SpiderFoot HX ----------
 plan_spiderfoot_osint(){
   [[ "$USE_SPIDERFOOT" -eq 1 ]] || return 0
@@ -999,12 +1130,14 @@ consolidate_assets(){
   printf "%s\n" "${TARGET_DOMAINS[@]}" > "${domains_file}"
   [[ -n "${COMPANY_NAME}" ]] && printf "%s\n" "${COMPANY_NAME}" > "${REPORTS_DIR}/company.txt"
 
-  : > "${subdomains_file}"
-  for domain in "${TARGET_DOMAINS[@]}"; do
-    [[ -f "${CT_DIR}/${domain}.subdomains.txt" ]] && cat "${CT_DIR}/${domain}.subdomains.txt" >> "${subdomains_file}"
-    [[ -f "${SNI_DIR}/${domain}.sni-hosts.txt" ]] && cat "${SNI_DIR}/${domain}.sni-hosts.txt" >> "${subdomains_file}"
-  done
-  sort -u "${subdomains_file}" -o "${subdomains_file}" || true
+  if [[ ! -s "${subdomains_file}" ]]; then
+    : > "${subdomains_file}"
+    for domain in "${TARGET_DOMAINS[@]}"; do
+      [[ -f "${CT_DIR}/${domain}.subdomains.txt" ]] && cat "${CT_DIR}/${domain}.subdomains.txt" >> "${subdomains_file}"
+      [[ -f "${SNI_DIR}/${domain}.sni-hosts.txt" ]] && cat "${SNI_DIR}/${domain}.sni-hosts.txt" >> "${subdomains_file}"
+    done
+    sort -u "${subdomains_file}" -o "${subdomains_file}" || true
+  fi
 
   if [[ -s "${ALL_IPS_FILE}" ]]; then
     sort -u "${ALL_IPS_FILE}" -o "${ALL_IPS_FILE}" || true
@@ -1067,9 +1200,8 @@ print_summary(){
   echo "  ${REPORTS_DIR}    -> Consolidated lists"
   echo
   echo "Next steps:"
-  echo "  - Merge DNS + CT + SNI + SpiderFoot subdomains."
-  echo "  - Resolve subdomains to IPs and cross with ASNs/cloud prefixes."
-  echo "  - Feed prioritized targets into nmap/httpx/ffuf or your active stack."
+  echo "  - Revisa reports/subdomains-resolved.tsv y los Shodan exports para priorizar objetivos."
+  echo "  - Alimenta tu stack activo (nmap/httpx/ffuf) o utiliza --httpx-final para obtener banners básicos automáticamente."
   echo
   local sub_count=0
   local ip_count=0
@@ -1144,7 +1276,12 @@ while [[ $# -gt 0 ]]; do
     -X|--spiderfoot)
       USE_SPIDERFOOT=1; shift 1;;
     -A|--apex-file)
-      APEX_LIST_FILE="$2"; shift 2;;
+      if [[ -z "${2:-}" || "${2:0:1}" == "-" ]]; then
+        warn "Option $1 expects a file path. Ignoring manual apex list."
+        shift 1
+      else
+        APEX_LIST_FILE="$2"; shift 2
+      fi;;
     -U|--user-agent)
       CUSTOM_USER_AGENT="$2"; USE_RANDOM_UA=0; shift 2;;
     --random-ua)
@@ -1162,6 +1299,8 @@ while [[ $# -gt 0 ]]; do
       awk -v min="${DELAY_MIN}" -v max="${DELAY_MAX}" 'BEGIN{if (min>=max) exit 1; else exit 0}' || die "--random-delay MIN must be less than MAX"
       DELAY_FIXED=""
       shift 2;;
+    --httpx-final)
+      RUN_FINAL_HTTPX=1; shift 1;;
     -f|--config)
       CONFIG_FILE="$2"; shift 2;;
     -h|--help)
@@ -1217,12 +1356,15 @@ for domain in "${TARGET_DOMAINS[@]}"; do
   recon_cloud_aws "${domain}"
   recon_shodan "${domain}"
 done
-recon_asn
-emit_auto_shodan_queries
-plan_spiderfoot_osint
 run_subfinder_pipeline
 auto_process_sni_outputs
 run_auto_apex_pipeline
+collect_subdomains
+resolve_subdomains_to_ips
+recon_asn
+emit_auto_shodan_queries
+plan_spiderfoot_osint
+final_httpx_scan
 
 consolidate_assets
 print_summary

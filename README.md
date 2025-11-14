@@ -13,11 +13,13 @@ Hadixxity condenses Jason Haddix's *Modern Recon* techniques into a single autom
 ### Features
 - Opinionated 10-phase flow: corporate intel → WHOIS/DNS/CT → ASN/BGP → cloud → Shodan → SNI parsing → SpiderFoot HX → consolidation.
 - Multi-domain aware runs (repeat `-d`) with automatic IP harvesting and BGP/ARIN pivots (BGPView API + bgp.he.net links).
-- Hurricane Electric “Network Tools” style summaries (DMARC/SPF/DKIM/BIMI, reverse IP, HTTP headers) saved per domain.
+- Hurricane Electric “Network Tools” style summaries (DMARC/SPF/DKIM/BIMI, reverse IP, HTTP headers) saved per dominio.
 - Automatic apex harvesting (CT, SNI, MX) feeding an optional subfinder → httpx loop; you can still hand a custom list via `-A`.
+- Subdomain inventory builder: fusiona CT/SNI/subfinder y los resuelve a IPs cruzándolos con prefixes/ASNs antes de consolidar.
 - Aggregated Shodan helpers: cheat sheet, per-domain CLI exports + auto-generated `asn:` / `net:` queries from discovered data.
+- Opcional `--httpx-final` para sacar banners httpx sobre todos los subdominios consolidados, reutilizando tus UA/delays.
 - Tuning knobs for operational security: custom or random User-Agent, fixed/random delays between requests.
-- Config file loader (`.hadixxity.env`) for API keys (Shodan, SpiderFoot HX, SecurityTrails, Censys, ...).
+- Config file loader (`.hadixxity.env`) para API keys (Shodan, SpiderFoot HX, SecurityTrails, Censys, ProjectDiscovery, ...).
 - ASCII art banner so you remember you're in Hadixxity land.
 
 ### Requirements
@@ -46,7 +48,8 @@ O bien, usa el script auxiliar para preparar todo tras clonar el repositorio:
 ```bash
 ./install.sh
 # edita .hadixxity.env con tus claves y ejecuta hadixxity.sh
-# (opcional) shodan init "$SHODAN_API_KEY"  # si la CLI aún no tiene API key
+# (opcional) shodan init "$SHODAN_API_KEY"
+# (opcional) ./hadixxity.sh ... --httpx-final    # httpx final sobre subdominios fusionados
 ```
 
 ### User-Agent & delay controls
@@ -63,6 +66,7 @@ Key flags:
 - `-X` drops a SpiderFoot HX action plan
 - `-f` points to a custom env file with secrets
 - `-A` feeds *your* file with apex domains into the subfinder → httpx loop described in the PDF (auto mode runs even sin este flag)
+- `--httpx-final` lanza httpx al final contra `reports/subdomains.txt`
 
 ### Output Layout
 ```
@@ -92,16 +96,21 @@ recon-target.com/
 - Raw headers live in `dns/<domain>.http-headers.txt`, emulating the HTTP Headers / OS detector widget from the HE toolbox.
 
 ### Apex recon loop (subfinder + httpx)
-- Provide `-A fisAPEXES` (or any file with one apex per line) to replay the `subfinder -d ... | httpx ...` loop shown in the PDF.
+- Provide `-A fisAPEXES` (or any file with one apex per line) to replay la pipeline manual del PDF.
 - Even sin `-A`, Hadixxity construye `meta/apex-auto.txt` con apex descubiertos vía CT/SNI/MX (ignorando proveedores comunes) y ejecuta la pipeline automáticamente.
 - Resultados (manual o auto) aterrizan en `notes/apex-httpx/<apex>.httpx.txt` con los mismos switches del slide (status code, title, content length, ASN, geolocalización, multi-puerto, random UA, etc.).
 - El fichero `reports/apex-auto.txt` conserva la lista usada para que puedas revisarla / depurarla.
-- Para desbloquear todos los proveedores de ProjectDiscovery (Sources/ASNmap, etc.) añade tu `PROJECTDISCOVERY_API_KEY` a `.hadixxity.env` o exporta `PDCP_API_KEY` antes de ejecutar.
+- Para desbloquear todos los proveedores de ProjectDiscovery (Sources/ASNmap, etc.) añade tu `PROJECTDISCOVERY_API_KEY` a `.hadixxity.env` o ejecuta `shodan init "$SHODAN_API_KEY"` para la CLI.
 
 ### Shodan automation
-- `shodan/<domain>.*.txt` contains the raw CLI exports (certificate CN, hostname search, org pivot, HTTP stack, RDP).
-- `shodan/<domain>.cheatsheet.txt` keeps the Modern Recon dorks handy.
-- `shodan/aggregated-queries.txt` auto-builds `asn:` and `net:` filters from everything the tool discovered (BGPView, DNS, manual seeds) so you can paste them straight into the CLI or web UI.
+- `shodan/<domain>.*.txt` contiene las exportaciones crudas de la CLI (certificate CN, hostname search, org pivot, HTTP stack, RDP).
+- `shodan/<domain>.cheatsheet.txt` mantiene los dorks del PDF.
+- `shodan/aggregated-queries.txt` auto-genera filtros `asn:` y `net:` a partir de todo lo descubierto (BGPView, DNS, semillas) listos para la CLI/Web UI.
+
+### Subdomain consolidation & httpx final
+- Hadixxity fusiona CT, SNI y los resultados subfinder/httpx en `reports/subdomains.txt`.
+- Todos los subdominios se resuelven y registran en `reports/subdomains-resolved.tsv` (A/AAAA + cruce con ASNs/prefixes).
+- Si pasas `--httpx-final`, el workflow lanza httpx contra la lista consolidada y escribe los banners en `reports/subdomains-httpx.txt`.
 
 ### SNI Parsing
 - Drop any TLS/SNI hunter output (`*.txt`) into `sni/` and Hadixxity will auto-parse it for every apex during Phase 8.
@@ -109,7 +118,7 @@ recon-target.com/
   ```bash
   process_sni_outputs "target.com"
   ```
-- Normalized hostnames land in `sni/<domain>.sni-hosts.txt` and get merged automatically into `reports/subdomains.txt`.
+- Normalized hostnames land in `sni/<domain>.sni-hosts.txt` y el merge automático los lleva a `reports/subdomains.txt`.
 
 ### SpiderFoot HX
 - Put API / console data inside `.hadixxity.env`.
@@ -117,10 +126,9 @@ recon-target.com/
 - Export HX results into `spiderfoot/exports/` and re-run Hadixxity to re-consolidate.
 
 ### Suggested Next Steps
-- Feed `reports/subdomains.txt` to `httpx`, `ffuf`, etc.
-- Cross `reports/ips.txt` with `cloud/aws-ipv4-prefixes.tsv` for cloud-region tagging.
-- Paste the entries in `shodan/aggregated-queries.txt` straight into the CLI/Web UI to hunt across every ASN/prefix found.
-- Extend `config.env.example` with more APIs (SecurityTrails, Censys) and wire new phases/functions as needed.
+- Revisa `reports/subdomains-resolved.tsv` + `shodan/aggregated-queries.txt` para priorizar hosts interesantes.
+- Alimenta tu stack activo (`nmap`, `ffuf`, etc.) o usa `--httpx-final` para sacar banners rápidos durante el workflow.
+- Extiende `config.env.example` con más APIs (SecurityTrails WHOIS history, SecurityScorecard, etc.) a medida que crezcan los módulos.
 
 Happy hunting.
 
