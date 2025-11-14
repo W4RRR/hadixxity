@@ -1267,9 +1267,27 @@ print_summary(){
     echo -e "${C_CYN}--- Subdomains with IPs ---${C_RST}"
     # Skip header line and group by subdomain
     declare -A subdomain_ips=()
+    declare -A seen_ips=()
     while IFS=$'\t' read -r subdomain record value; do
       [[ "$subdomain" == "subdomain" ]] && continue  # Skip header
       [[ -z "$subdomain" || "$value" == "-" ]] && continue
+      # Clean value: remove trailing dots, trim spaces
+      value="${value%.}"
+      value="${value#"${value%%[![:space:]]*}"}"
+      value="${value%"${value##*[![:space:]]}"}"
+      # Only process A and AAAA records (skip CNAMEs and other non-IP records)
+      if [[ "$record" != "A" && "$record" != "AAAA" ]]; then
+        continue
+      fi
+      # Basic IP validation: IPv4 (contains dots and numbers) or IPv6 (contains colons)
+      if [[ "$value" != *.* ]] && [[ "$value" != *:* ]]; then
+        continue
+      fi
+      # Avoid duplicates per subdomain
+      local key="${subdomain}:${value}"
+      [[ -n "${seen_ips[$key]:-}" ]] && continue
+      seen_ips["$key"]=1
+      
       if [[ -z "${subdomain_ips[$subdomain]:-}" ]]; then
         subdomain_ips["$subdomain"]="$value"
       else
@@ -1282,7 +1300,7 @@ print_summary(){
     for subdomain in "${!subdomain_ips[@]}"; do
       if (( displayed < 20 )); then
         echo "  ${subdomain} -> ${subdomain_ips[$subdomain]}"
-        ((displayed++))
+        displayed=$((displayed + 1))
       fi
     done
     if (( ${#subdomain_ips[@]} > 20 )); then
