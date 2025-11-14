@@ -22,6 +22,14 @@ H   H   A   A  DDDD   III  XXXXX  XXXXX  III    T      Y
 - Tools: `dig`, `host`, `whois`, `curl`
 - Optional: `jq`, `shodan` CLI, `ipcalc`/`sipcalc` for manual steps
 
+### API keys / config file
+- `SHODAN_API_KEY` – CLI lookups when you pass `-S`
+- `SPIDERFOOT_URL` / `SPIDERFOOT_API_KEY` – documents your HX console for `-X`
+- `SECURITYTRAILS_API_KEY` – ready for DNS/history enrichment if you extend the script
+- `CENSYS_API_ID` / `CENSYS_API_SECRET` – wired for future Censys modules
+
+Copy `config.env.example` to `.hadixxity.env`, populate the values you need, and the script will auto-source it on launch.
+
 ### Quick Start
 ```bash
 cp config.env.example .hadixxity.env          # put your API keys here
