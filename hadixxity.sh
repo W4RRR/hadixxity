@@ -1046,7 +1046,7 @@ resolve_subdomains_to_ips(){
   local subs="${REPORTS_DIR}/subdomains.txt"
   [[ -s "${subs}" ]] || { info "[PHASE 8] Skipping subdomain resolution (no inventory)."; return 0; }
   local out="${REPORTS_DIR}/subdomains-resolved.tsv"
-  declare -A seen
+  declare -A seen=()
   echo -e "subdomain\trecord\tvalue" > "${out}"
   while read -r sub; do
     sub="${sub//[$'\t\r\n ']/}"
