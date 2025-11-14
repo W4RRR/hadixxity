@@ -83,11 +83,12 @@ recon-target.com/
 - `shodan/aggregated-queries.txt` auto-builds `asn:` and `net:` filters from everything the tool discovered (BGPView, DNS, manual seeds) so you can paste them straight into the CLI or web UI.
 
 ### SNI Parsing
-After running your TLS/SNI hunter place its `.txt` outputs under `sni/` and invoke:
-```bash
-process_sni_outputs "target.com"
-```
-Parsed hostnames land in `sni/target.com.sni-hosts.txt` and automatically roll into the consolidated lists.
+- Drop any TLS/SNI hunter output (`*.txt`) into `sni/` and Hadixxity will auto-parse it for every apex during Phase 8.
+- You can still run it manually if you want to re-process a subset:
+  ```bash
+  process_sni_outputs "target.com"
+  ```
+- Normalized hostnames land in `sni/<domain>.sni-hosts.txt` and get merged automatically into `reports/subdomains.txt`.
 
 ### SpiderFoot HX
 - Put API / console data inside `.hadixxity.env`.

@@ -720,6 +720,19 @@ process_sni_outputs(){
   ok "[PHASE 8] Parsed hostnames saved to ${out}"
 }
 
+auto_process_sni_outputs(){
+  if ! compgen -G "${SNI_DIR}/*.txt" >/dev/null 2>&1; then
+    warn "[PHASE 8] No SNI scanner dumps under ${SNI_DIR}. Drop your results there to enable auto-parsing."
+    return 0
+  fi
+  local processed=0
+  for domain in "${TARGET_DOMAINS[@]}"; do
+    process_sni_outputs "${domain}"
+    processed=1
+  done
+  [[ "${processed}" -eq 1 ]] && ok "[PHASE 8] SNI parsing pipeline completed for available dumps."
+}
+
 run_subfinder_pipeline(){
   [[ -n "${APEX_LIST_FILE}" ]] || return 0
   if [[ ! -f "${APEX_LIST_FILE}" ]]; then
@@ -939,9 +952,7 @@ recon_asn
 emit_auto_shodan_queries
 plan_spiderfoot_osint
 run_subfinder_pipeline
-
-warn "[PHASE 8] Reminder: drop your TLS/SNI scanner outputs into ${SNI_DIR}"
-warn "             then run: process_sni_outputs \"${TARGET_DOMAINS[0]}\""
+auto_process_sni_outputs
 
 consolidate_assets
 print_summary
