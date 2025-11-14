@@ -168,8 +168,9 @@ normalize_host(){
 append_file_contents(){
   local src="$1"
   local dest="$2"
-  [[ -z "${src:-}" ]] && return 0
-  [[ -f "$src" ]] && cat "$src" >> "$dest"
+  if [[ -n "${src}" && -f "$src" ]]; then
+    cat "$src" >> "$dest"
+  fi
 }
 
 is_positive_float(){
