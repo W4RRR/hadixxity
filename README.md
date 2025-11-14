@@ -35,8 +35,14 @@ Copy `config.env.example` to `.hadixxity.env`, populate the values you need, and
 ### Quick Start
 ```bash
 cp config.env.example .hadixxity.env          # put your API keys here
+dos2unix .hadixxity.env                       # ensure LF line endings on Unix hosts
 chmod +x hadixxity.sh
 ./hadixxity.sh -d target.com -d target.org -n "Target Corp" -S -C -X
+```
+O bien, usa el script auxiliar para preparar todo tras clonar el repositorio:
+```bash
+./install.sh
+# edita .hadixxity.env con tus claves y ejecuta hadixxity.sh
 ```
 
 Key flags:
