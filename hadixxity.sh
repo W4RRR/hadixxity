@@ -45,11 +45,11 @@ trap 'rc=$?; err "Execution stopped at line $LINENO while running: $BASH_COMMAND
 
 ascii_banner(){
 cat <<'EOF'
-H   H   AAAAA  DDDD   III  XXXXX  XXXXX  III  TTTTT  Y   Y
-H   H   A   A  D   D   I   X   X X   X   I     T     Y Y
-HHHHH   AAAAA  D   D   I    X X   X X    I     T      Y
-H   H   A   A  D   D   I   X   X X   X   I     T      Y
-H   H   A   A  DDDD   III  XXXXX  XXXXX  III    T      Y
+ _   _    _    ____ ___ ____  _   _  ____ ___ _____ ___
+| | | |  / \  / ___|_ _|  _ \| \ | |/ ___|_ _| ____|_ _|
+| |_| | / _ \| |    | || |_) |  \| | |  _ | ||  _|  | |
+|  _  |/ ___ \ |___ | ||  _ <| |\  | |_| || || |___ | |
+|_| |_/_/   \_\____|___|_| \_\_| \_|\____|___|_____|___|
 EOF
 }
 
@@ -71,6 +71,11 @@ Options:
   -C, --cloud        Enable AWS cloud helper (downloads ip-ranges.json)
   -X, --spiderfoot   Generate SpiderFoot HX automation plan
   -A, --apex-file    File with apex domains for subfinder→httpx pipeline
+  -U, --user-agent   Custom User-Agent string for HTTP requests
+      --random-ua    Pick a random User-Agent from the internal pool
+      --delay SEC    Fixed delay (supports decimals) inserted before network requests
+      --random-delay MIN:MAX
+                     Random delay (supports decimals) between MIN and MAX seconds
   -f, --config       Path to env file with API keys (default: ./.hadixxity.env)
   -h, --help         Show this help
 
@@ -88,6 +93,13 @@ EOF
 declare -a TARGET_DOMAINS=()
 declare -a SHARED_INFRA_SUFFIXES=("outlook.com" "office365.com" "protection.outlook.com" "google.com" "googlemail.com" "gmail.com" "amazonaws.com" "cloudfront.net" "akadns.net" "akamaiedge.net" "akamai.net" "akamaitechnologies.com" "azurefd.net" "trafficmanager.net" "fastly.net" "cdn.cloudflare.net")
 declare -a SPECIAL_CCTLD=("co.uk" "ac.uk" "gov.uk" "com.au" "net.au" "org.au" "com.br" "com.mx" "com.tr" "com.ar" "co.jp" "co.kr" "co.in" "co.za" "com.sg")
+declare -a USER_AGENT_POOL=(
+"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+"Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
+"Mozilla/5.0 (X11; Linux x86_64; rv:115.0) Gecko/20100101 Firefox/115.0"
+"curl/8.4.0"
+"HADIXXITY Recon Bot"
+)
 TARGET_DOMAIN=""
 COMPANY_NAME=""
 SEED_IP=""
@@ -98,6 +110,7 @@ USE_SHODAN=0
 USE_CLOUD=0
 USE_SPIDERFOOT=0
 APEX_LIST_FILE=""
+PROJECTDISCOVERY_API_KEY=""
 
 # Directories (filled later)
 META_DIR=""
@@ -119,6 +132,11 @@ ALL_PREFIXES_FILE=""
 AUTO_APEX_FILE=""
 AWS_RANGES_READY=0
 AWS_RANGES_JSON=""
+CUSTOM_USER_AGENT=""
+USE_RANDOM_UA=0
+DELAY_FIXED=""
+DELAY_MIN=""
+DELAY_MAX=""
 
 # ---------- Helpers ----------
 need_cmd(){
@@ -128,6 +146,48 @@ need_cmd(){
 ensure_file(){
   local file="$1"
   [[ -f "$file" ]] || : > "$file"
+}
+
+is_positive_float(){
+  [[ "$1" =~ ^[0-9]+([.][0-9]+)?$ ]]
+}
+
+apply_delay(){
+  if [[ -n "${DELAY_FIXED}" ]]; then
+    sleep "${DELAY_FIXED}"
+  elif [[ -n "${DELAY_MIN}" && -n "${DELAY_MAX}" ]]; then
+    local span
+    span=$(awk -v min="${DELAY_MIN}" -v max="${DELAY_MAX}" 'BEGIN{srand(); printf "%.3f", min + (max-min)*rand()}')
+    sleep "${span}"
+  fi
+}
+
+pick_random_user_agent(){
+  local count=${#USER_AGENT_POOL[@]}
+  if ((count == 0)); then
+    echo "hadixxity/${VERSION}"
+  else
+    local idx=$((RANDOM % count))
+    echo "${USER_AGENT_POOL[$idx]}"
+  fi
+}
+
+init_user_agent(){
+  if ((USE_RANDOM_UA)); then
+    CUSTOM_USER_AGENT=$(pick_random_user_agent)
+  elif [[ -z "${CUSTOM_USER_AGENT}" ]]; then
+    CUSTOM_USER_AGENT="hadixxity/${VERSION}"
+  fi
+}
+
+run_curl(){
+  apply_delay
+  curl -A "${CUSTOM_USER_AGENT}" "$@"
+}
+
+shodan_search(){
+  apply_delay
+  shodan search "$@"
 }
 
 derive_apex(){
@@ -220,8 +280,19 @@ ensure_shodan_ready(){
     USE_SHODAN=0
     return 0
   fi
-  if [[ -z "${SHODAN_API_KEY:-}" ]]; then
-    warn "SHODAN_API_KEY is not defined; CLI queries may fail."
+
+  local shodan_ready=0
+  if shodan info >/dev/null 2>&1; then
+    shodan_ready=1
+  elif [[ -n "${SHODAN_API_KEY:-}" ]]; then
+    if shodan init "${SHODAN_API_KEY}" >/dev/null 2>&1; then
+      shodan_ready=1
+    fi
+  fi
+
+  if ((shodan_ready == 0)); then
+    warn "Shodan CLI is not authenticated. Set SHODAN_API_KEY or run 'shodan init <KEY>'. Disabling Shodan module."
+    USE_SHODAN=0
   fi
 }
 
@@ -269,6 +340,7 @@ create_structure(){
     echo "USE_SHODAN=${USE_SHODAN}"
     echo "USE_CLOUD=${USE_CLOUD}"
     echo "USE_SPIDERFOOT=${USE_SPIDERFOOT}"
+    echo "PROJECTDISCOVERY_API_KEY_SET=$([[ -n "${PROJECTDISCOVERY_API_KEY}" ]] && echo 1 || echo 0)"
     echo "TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
   } > "${META_DIR}/target-info.txt"
 
@@ -402,10 +474,10 @@ capture_http_headers(){
   local out="${DNS_DIR}/${domain}.http-headers.txt"
   {
     echo "# HTTPS (443)"
-    curl -skI --max-time 15 "https://${domain}" || echo "[curl] HTTPS probe failed for ${domain}"
+    run_curl -skI --max-time 15 "https://${domain}" || echo "[curl] HTTPS probe failed for ${domain}"
     echo
     echo "# HTTP (80)"
-    curl -sI --max-time 15 "http://${domain}" || echo "[curl] HTTP probe failed for ${domain}"
+    run_curl -sI --max-time 15 "http://${domain}" || echo "[curl] HTTP probe failed for ${domain}"
   } > "${out}"
 }
 
@@ -480,7 +552,7 @@ recon_ct(){
 
   if command -v jq >/dev/null 2>&1; then
     local url="https://crt.sh/?q=%25${domain}&output=json"
-    curl -s "${url}" > "${json}" || warn "curl crt.sh JSON failed"
+    run_curl -s "${url}" > "${json}" || warn "curl crt.sh JSON failed"
     jq -r '.[].name_value' "${json}" 2>/dev/null \
       | tr ' ' '\n' \
       | sed 's/\*\.//g' \
@@ -560,7 +632,7 @@ bgpview_search_for_domains(){
   while read -r domain; do
     [[ -z "$domain" ]] && continue
     local json="${ASN_DIR}/${domain}.bgpview-search.json"
-    curl -s "https://api.bgpview.io/search?query_term=${domain}" -o "${json}" || { warn "BGPView search failed for ${domain}"; continue; }
+    run_curl -s "https://api.bgpview.io/search?query_term=${domain}" -o "${json}" || { warn "BGPView search failed for ${domain}"; continue; }
     local asns prefixes
     asns=$(jq -r '.data.asns[].asn // empty' "${json}" 2>/dev/null || true)
     prefixes=$(jq -r '.data.prefixes[].prefix // empty' "${json}" 2>/dev/null || true)
@@ -592,7 +664,7 @@ enrich_asns_from_ips(){
   while read -r ip; do
     [[ -z "$ip" ]] && continue
     local json="${ASN_DIR}/${ip}.bgpview.json"
-    curl -s "https://api.bgpview.io/ip/${ip}" -o "${json}" || { warn "BGPView IP lookup failed for ${ip}"; continue; }
+    run_curl -s "https://api.bgpview.io/ip/${ip}" -o "${json}" || { warn "BGPView IP lookup failed for ${ip}"; continue; }
     local asn asn_name
     asn=$(jq -r '.data.asn.asn // empty' "${json}" 2>/dev/null || true)
     asn_name=$(jq -r '.data.asn.name // empty' "${json}" 2>/dev/null || true)
@@ -633,7 +705,7 @@ recon_cloud_aws(){
 
   if [[ "${AWS_RANGES_READY}" -eq 0 ]]; then
     info "[PHASE 6] Downloading AWS ip-ranges.json"
-    curl -s "https://ip-ranges.amazonaws.com/ip-ranges.json" -o "${AWS_RANGES_JSON}" || { warn "Failed to fetch AWS ranges"; return 0; }
+    run_curl -s "https://ip-ranges.amazonaws.com/ip-ranges.json" -o "${AWS_RANGES_JSON}" || { warn "Failed to fetch AWS ranges"; return 0; }
     jq -r '.prefixes[] | [.region, .service, .ip_prefix] | @tsv' "${AWS_RANGES_JSON}" > "${CLOUD_DIR}/aws-ipv4-prefixes.tsv" || true
     AWS_RANGES_READY=1
   fi
@@ -717,17 +789,17 @@ recon_shodan(){
   local q_http="(ssl.cert.subject:\"${domain}\" OR hostname:\"${domain}\") port:80,443,8080,8443"
   local q_rdp="(ssl.cert.subject:\"${domain}\" OR hostname:\"${domain}\") port:3389"
 
-  shodan search --fields ip_str,port,org,hostnames "${q1}" \
+  shodan_search --fields ip_str,port,org,hostnames "${q1}" \
     > "${SHODAN_DIR}/${domain}.ssl-subject.txt" 2>&1 || warn "Shodan query ssl-subject failed for ${domain}"
-  shodan search --fields ip_str,port,org,hostnames "${q2}" \
+  shodan_search --fields ip_str,port,org,hostnames "${q2}" \
     > "${SHODAN_DIR}/${domain}.hostname.txt" 2>&1 || warn "Shodan query hostname failed for ${domain}"
   if [[ -n "${q_org}" ]]; then
-    shodan search --fields ip_str,port,org,hostnames "${q_org}" \
+    shodan_search --fields ip_str,port,org,hostnames "${q_org}" \
       > "${SHODAN_DIR}/${domain}.org.txt" 2>&1 || warn "Shodan query org failed"
   fi
-  shodan search --fields ip_str,port,org,hostnames,title "${q_http}" \
+  shodan_search --fields ip_str,port,org,hostnames,title "${q_http}" \
     > "${SHODAN_DIR}/${domain}.http-stack.txt" 2>&1 || warn "Shodan HTTP query failed for ${domain}"
-  shodan search --fields ip_str,port,org,hostnames,os "${q_rdp}" \
+  shodan_search --fields ip_str,port,org,hostnames,os "${q_rdp}" \
     > "${SHODAN_DIR}/${domain}.rdp.txt" 2>&1 || warn "Shodan RDP query failed for ${domain}"
 
   generate_shodan_playbook "${domain}"
@@ -799,7 +871,7 @@ process_sni_outputs(){
 
 auto_process_sni_outputs(){
   if ! compgen -G "${SNI_DIR}/*.txt" >/dev/null 2>&1; then
-    warn "[PHASE 8] No SNI scanner dumps under ${SNI_DIR}. Drop your results there to enable auto-parsing."
+    info "[PHASE 8] No SNI scanner dumps under ${SNI_DIR}. Drop your results there to enable auto-parsing."
     return 0
   fi
   local processed=0
@@ -830,7 +902,12 @@ subfinder_httpx_loop(){
     apex="${apex//[$'\t\r\n ']/}"
     [[ -z "$apex" ]] && continue
     info "  [APEX] ${apex}"
-    subfinder -d "${apex}" -all 2>/dev/null \
+    apply_delay
+    local subfinder_cmd=(subfinder -d "${apex}" -all)
+    if [[ -n "${PROJECTDISCOVERY_API_KEY}" ]]; then
+      subfinder_cmd=(env PDCP_API_KEY="${PROJECTDISCOVERY_API_KEY}" "${subfinder_cmd[@]}")
+    fi
+    "${subfinder_cmd[@]}" 2>/dev/null \
       | httpx -status-code -title -content-length -web-server -asn -location \
               -no-color -follow-redirects -t 15 \
               -ports 80,8080,443,8443,4443,8888 \
@@ -972,6 +1049,57 @@ print_summary(){
   echo "  - Resolve subdomains to IPs and cross with ASNs/cloud prefixes."
   echo "  - Feed prioritized targets into nmap/httpx/ffuf or your active stack."
   echo
+  local sub_count=0
+  local ip_count=0
+  local asn_count=0
+  local prefix_count=0
+  local shodan_fail=0
+  local shodan_success=0
+
+  if [[ -f "${REPORTS_DIR}/subdomains.txt" ]]; then
+    sub_count=$(wc -l < "${REPORTS_DIR}/subdomains.txt" 2>/dev/null | tr -d ' ')
+  fi
+  if [[ -s "${ALL_IPS_FILE}" ]]; then
+    ip_count=$(wc -l < "${ALL_IPS_FILE}" 2>/dev/null | tr -d ' ')
+  fi
+  if [[ -s "${ALL_ASNS_FILE}" ]]; then
+    asn_count=$(wc -l < "${ALL_ASNS_FILE}" 2>/dev/null | tr -d ' ')
+  fi
+  if [[ -s "${ALL_PREFIXES_FILE}" ]]; then
+    prefix_count=$(wc -l < "${ALL_PREFIXES_FILE}" 2>/dev/null | tr -d ' ')
+  fi
+  if [[ -f "${SHODAN_DIR}/aggregated-queries.txt" ]]; then
+    shodan_success=1
+  fi
+  if ((USE_SHODAN == 0)); then
+    shodan_fail=1
+  fi
+
+  echo -e "${C_BLU}================= TECHNICAL SUMMARY ===============${C_RST}"
+  echo "- Subdomains discovered: ${sub_count}"
+  echo "- Unique IPs resolved:   ${ip_count}"
+  echo "- ASNs catalogued:       ${asn_count}"
+  echo "- Prefixes catalogued:   ${prefix_count}"
+  if ((shodan_success)); then
+    echo "- Shodan exports:        ${SHODAN_DIR} (cheat sheet + aggregated queries)"
+  fi
+  if ((shodan_fail)); then
+    echo "- Shodan status:         skipped (no auth or CLI missing)"
+  fi
+  if [[ -s "${AUTO_APEX_FILE}" ]]; then
+    local apex_count
+    apex_count=$(wc -l < "${AUTO_APEX_FILE}" 2>/dev/null | tr -d ' ')
+    echo "- Apex seeds (auto):     ${apex_count} -> ${AUTO_APEX_FILE}"
+  fi
+  if [[ -n "${APEX_LIST_FILE:-}" ]]; then
+    echo "- Apex seeds (manual):   ${APEX_LIST_FILE}"
+  fi
+  if [[ -n "${DELAY_FIXED}" ]]; then
+    echo "- Delay mode:            fixed ${DELAY_FIXED}s"
+  elif [[ -n "${DELAY_MIN}" ]]; then
+    echo "- Delay mode:            random ${DELAY_MIN}-${DELAY_MAX}s"
+  fi
+  echo
 }
 
 # ---------- Arg parsing ----------
@@ -995,6 +1123,23 @@ while [[ $# -gt 0 ]]; do
       USE_SPIDERFOOT=1; shift 1;;
     -A|--apex-file)
       APEX_LIST_FILE="$2"; shift 2;;
+    -U|--user-agent)
+      CUSTOM_USER_AGENT="$2"; USE_RANDOM_UA=0; shift 2;;
+    --random-ua)
+      USE_RANDOM_UA=1; shift 1;;
+    --delay)
+      is_positive_float "$2" || die "Invalid value for --delay (use positive number, decimals allowed)"
+      DELAY_FIXED="$2"; DELAY_MIN=""; DELAY_MAX=""; shift 2;;
+    --random-delay)
+      range="$2"
+      [[ "$range" == *:* ]] || die "Invalid --random-delay format. Use MIN:MAX"
+      DELAY_MIN="${range%%:*}"
+      DELAY_MAX="${range##*:}"
+      is_positive_float "${DELAY_MIN}" || die "Invalid minimum for --random-delay"
+      is_positive_float "${DELAY_MAX}" || die "Invalid maximum for --random-delay"
+      awk -v min="${DELAY_MIN}" -v max="${DELAY_MAX}" 'BEGIN{if (min>=max) exit 1; else exit 0}' || die "--random-delay MIN must be less than MAX"
+      DELAY_FIXED=""
+      shift 2;;
     -f|--config)
       CONFIG_FILE="$2"; shift 2;;
     -h|--help)
@@ -1015,6 +1160,9 @@ TARGET_DOMAIN="${TARGET_DOMAINS[0]}"
 
 # ---------- Runtime ----------
 load_config_file "${CONFIG_FILE}"
+
+[[ -z "${CUSTOM_USER_AGENT}" && -n "${HADIXXITY_USER_AGENT:-}" ]] && CUSTOM_USER_AGENT="${HADIXXITY_USER_AGENT}"
+init_user_agent
 
 need_cmd dig
 need_cmd whois

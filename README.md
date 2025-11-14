@@ -3,11 +3,11 @@
 Hadixxity condenses Jason Haddix's *Modern Recon* techniques into a single automation-friendly workflow that keeps both manual OSINT context (PitchBook, SpiderFoot HX) and CLI-heavy tasks (WHOIS, DNS, CT, Shodan) stitched together.
 
 ```
-H   H   AAAAA  DDDD   III  XXXXX  XXXXX  III  TTTTT  Y   Y
-H   H   A   A  D   D   I   X   X X   X   I     T     Y Y
-HHHHH   AAAAA  D   D   I    X X   X X    I     T      Y
-H   H   A   A  D   D   I   X   X X   X   I     T      Y
-H   H   A   A  DDDD   III  XXXXX  XXXXX  III    T      Y
+ _   _    _    ____ ___ ____  _   _  ____ ___ _____ ___
+| | | |  / \  / ___|_ _|  _ \| \ | |/ ___|_ _| ____|_ _|
+| |_| | / _ \| |    | || |_) |  \| | |  _ | ||  _|  | |
+|  _  |/ ___ \ |___ | ||  _ <| |\  | |_| || || |___ | |
+|_| |_/_/   \_\____|___|_| \_\_| \_|\____|___|_____|___|
 ```
 
 ### Features
@@ -16,6 +16,7 @@ H   H   A   A  DDDD   III  XXXXX  XXXXX  III    T      Y
 - Hurricane Electric “Network Tools” style summaries (DMARC/SPF/DKIM/BIMI, reverse IP, HTTP headers) saved per domain.
 - Automatic apex harvesting (CT, SNI, MX) feeding an optional subfinder → httpx loop; you can still hand a custom list via `-A`.
 - Aggregated Shodan helpers: cheat sheet, per-domain CLI exports + auto-generated `asn:` / `net:` queries from discovered data.
+- Tuning knobs for operational security: custom or random User-Agent, fixed/random delays between requests.
 - Config file loader (`.hadixxity.env`) for API keys (Shodan, SpiderFoot HX, SecurityTrails, Censys, ...).
 - ASCII art banner so you remember you're in Hadixxity land.
 
@@ -29,6 +30,7 @@ H   H   A   A  DDDD   III  XXXXX  XXXXX  III    T      Y
 - `SPIDERFOOT_URL` / `SPIDERFOOT_API_KEY` – documents your HX console for `-X`
 - `SECURITYTRAILS_API_KEY` – ready for DNS/history enrichment if you extend the script
 - `CENSYS_API_ID` / `CENSYS_API_SECRET` – wired for future Censys modules
+- `PROJECTDISCOVERY_API_KEY` – unlocks all sources in the `subfinder`/`httpx` pipelines (auto-apex + manual `-A`)
 
 Copy `config.env.example` to `.hadixxity.env`, populate the values you need, and the script will auto-source it on launch.
 
@@ -44,6 +46,14 @@ O bien, usa el script auxiliar para preparar todo tras clonar el repositorio:
 ./install.sh
 # edita .hadixxity.env con tus claves y ejecuta hadixxity.sh
 ```
+
+### User-Agent & delay controls
+- `-U "MyReconBot/1.0"` define un User-Agent personalizado para todas las peticiones HTTP internas (curl, crt.sh, bgpview, etc.).
+- `--random-ua` elige aleatoriamente un User-Agent realista (Chrome, Firefox, Safari, curl…) al arrancar.
+- `--delay 0.5` añade un sleep fijo (soporta decimales) antes de cada petición de red/CLI intensiva.
+- `--random-delay 0.2:1.2` alterna aleatoriamente entre los valores indicados para simular actividad humana y evitar rate limits.
+
+Puedes combinar `--random-ua` con cualquiera de los modos de delay; si defines ambos (`--delay` y `--random-delay`) prevalece el último.
 
 Key flags:
 - `-S` enables Shodan module (requires CLI + key)
@@ -84,6 +94,7 @@ recon-target.com/
 - Even sin `-A`, Hadixxity construye `meta/apex-auto.txt` con apex descubiertos vía CT/SNI/MX (ignorando proveedores comunes) y ejecuta la pipeline automáticamente.
 - Resultados (manual o auto) aterrizan en `notes/apex-httpx/<apex>.httpx.txt` con los mismos switches del slide (status code, title, content length, ASN, geolocalización, multi-puerto, random UA, etc.).
 - El fichero `reports/apex-auto.txt` conserva la lista usada para que puedas revisarla / depurarla.
+- Para desbloquear todos los proveedores de ProjectDiscovery (Sources/ASNmap, etc.) añade tu `PROJECTDISCOVERY_API_KEY` a `.hadixxity.env` o exporta `PDCP_API_KEY` antes de ejecutar.
 
 ### Shodan automation
 - `shodan/<domain>.*.txt` contains the raw CLI exports (certificate CN, hostname search, org pivot, HTTP stack, RDP).
