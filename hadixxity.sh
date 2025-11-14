@@ -86,6 +86,8 @@ EOF
 
 # ---------- Globals ----------
 declare -a TARGET_DOMAINS=()
+declare -a SHARED_INFRA_SUFFIXES=("outlook.com" "office365.com" "protection.outlook.com" "google.com" "googlemail.com" "gmail.com" "amazonaws.com" "cloudfront.net" "akadns.net" "akamaiedge.net" "akamai.net" "akamaitechnologies.com" "azurefd.net" "trafficmanager.net" "fastly.net" "cdn.cloudflare.net")
+declare -a SPECIAL_CCTLD=("co.uk" "ac.uk" "gov.uk" "com.au" "net.au" "org.au" "com.br" "com.mx" "com.tr" "com.ar" "co.jp" "co.kr" "co.in" "co.za" "com.sg")
 TARGET_DOMAIN=""
 COMPANY_NAME=""
 SEED_IP=""
@@ -114,6 +116,7 @@ ALL_DOMAINS_FILE=""
 ALL_IPS_FILE=""
 ALL_ASNS_FILE=""
 ALL_PREFIXES_FILE=""
+AUTO_APEX_FILE=""
 AWS_RANGES_READY=0
 AWS_RANGES_JSON=""
 
@@ -125,6 +128,59 @@ need_cmd(){
 ensure_file(){
   local file="$1"
   [[ -f "$file" ]] || : > "$file"
+}
+
+derive_apex(){
+  local host="${1,,}"
+  host="${host#.}"
+  host="${host%%:*}"
+  [[ -z "$host" ]] && return 1
+  if [[ "$host" != *.* ]]; then
+    echo "$host"
+    return 0
+  fi
+  IFS='.' read -r -a parts <<< "$host"
+  local count=${#parts[@]}
+  if ((count < 2)); then
+    echo "$host"
+    return 0
+  fi
+  local last="${parts[count-1]}"
+  local second="${parts[count-2]}"
+  local suffix="${second}.${last}"
+  for special in "${SPECIAL_CCTLD[@]}"; do
+    if [[ "$suffix" == "$special" ]]; then
+      if ((count >= 3)); then
+        echo "${parts[count-3]}.${suffix}"
+      else
+        echo "$suffix"
+      fi
+      return 0
+    fi
+  done
+  echo "${second}.${last}"
+}
+
+should_ignore_apex(){
+  local apex="${1,,}"
+  for suffix in "${SHARED_INFRA_SUFFIXES[@]}"; do
+    if [[ "$apex" == "$suffix" ]] || [[ "$apex" == *".${suffix}" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+record_apex_candidate(){
+  local host="$1"
+  [[ -z "${host// }" ]] && return 0
+  ensure_file "${AUTO_APEX_FILE}"
+  local apex
+  apex=$(derive_apex "$host") || return 0
+  [[ -z "$apex" ]] && return 0
+  if ! should_ignore_apex "$apex"; then
+    record_unique_line "${AUTO_APEX_FILE}" "${apex}"
+  fi
 }
 
 record_unique_line(){
@@ -191,12 +247,15 @@ create_structure(){
   ALL_IPS_FILE="${META_DIR}/resolved-ips.txt"
   ALL_ASNS_FILE="${META_DIR}/resolved-asns.txt"
   ALL_PREFIXES_FILE="${META_DIR}/resolved-prefixes.txt"
+  AUTO_APEX_FILE="${META_DIR}/apex-auto.txt"
   : > "${ALL_DOMAINS_FILE}"
   : > "${ALL_IPS_FILE}"
   : > "${ALL_ASNS_FILE}"
   : > "${ALL_PREFIXES_FILE}"
+  : > "${AUTO_APEX_FILE}"
   for domain in "${TARGET_DOMAINS[@]}"; do
     record_unique_line "${ALL_DOMAINS_FILE}" "${domain}"
+    record_apex_candidate "${domain}"
   done
 
   {
@@ -294,6 +353,13 @@ recon_dns(){
   dig +noall +answer "${domain}" TXT  > "${DNS_DIR}/${domain}.TXT.txt"  2>/dev/null || true
   dig +noall +answer "${domain}" CAA  > "${DNS_DIR}/${domain}.CAA.txt"  2>/dev/null || true
   dig +noall +answer "${domain}" SOA  > "${DNS_DIR}/${domain}.SOA.txt"  2>/dev/null || true
+
+  if [[ -s "${DNS_DIR}/${domain}.MX.txt" ]]; then
+    awk '{print $NF}' "${DNS_DIR}/${domain}.MX.txt" | sed 's/\.$//' | while read -r mxhost; do
+      [[ -z "$mxhost" ]] && continue
+      record_apex_candidate "${mxhost}"
+    done
+  fi
 
   local ips
   ips=$(dig +short "${domain}" A "${domain}" AAAA | sort -u || true)
@@ -420,6 +486,11 @@ recon_ct(){
       | sed 's/\*\.//g' \
       | grep -F ".${domain#*.}" \
       | sort -u > "${subs}" || true
+    if [[ -s "${subs}" ]]; then
+      while read -r host; do
+        record_apex_candidate "${host}"
+      done < "${subs}"
+    fi
     ok "[PHASE 4] Candidate subdomains saved to ${subs}"
   else
     warn "jq missing; skipping structured crt.sh parsing."
@@ -717,6 +788,12 @@ process_sni_outputs(){
       | sort -u
   ) > "${out}"
 
+  if [[ -s "${out}" ]]; then
+    while read -r host; do
+      record_apex_candidate "${host}"
+    done < "${out}"
+  fi
+
   ok "[PHASE 8] Parsed hostnames saved to ${out}"
 }
 
@@ -733,23 +810,21 @@ auto_process_sni_outputs(){
   [[ "${processed}" -eq 1 ]] && ok "[PHASE 8] SNI parsing pipeline completed for available dumps."
 }
 
-run_subfinder_pipeline(){
-  [[ -n "${APEX_LIST_FILE}" ]] || return 0
-  if [[ ! -f "${APEX_LIST_FILE}" ]]; then
-    warn "[PHASE 8] Apex file ${APEX_LIST_FILE} not found; skipping subfinder/httpx pipeline."
-    return 0
-  fi
+subfinder_httpx_loop(){
+  local apex_file="$1"
+  local label="$2"
+  [[ -f "${apex_file}" ]] || { warn "[PHASE 8] Apex file ${apex_file} not found; skipping ${label} loop."; return 0; }
   if ! command -v subfinder >/dev/null 2>&1; then
-    warn "[PHASE 8] subfinder not found; cannot run apex enumeration loop."
+    warn "[PHASE 8] subfinder not found; cannot run ${label} enumeration loop."
     return 0
   fi
   if ! command -v httpx >/dev/null 2>&1; then
-    warn "[PHASE 8] httpx not found; cannot run apex enumeration loop."
+    warn "[PHASE 8] httpx not found; cannot run ${label} enumeration loop."
     return 0
   fi
   local output_dir="${NOTES_DIR}/apex-httpx"
   mkdir -p "${output_dir}"
-  info "[PHASE 8] Running subfinder → httpx loop using ${APEX_LIST_FILE}"
+  info "[PHASE 8] Running subfinder → httpx loop (${label})"
   while IFS= read -r apex; do
     apex="${apex%%#*}"
     apex="${apex//[$'\t\r\n ']/}"
@@ -762,8 +837,21 @@ run_subfinder_pipeline(){
               -no-fallback -probe-all-ips -random-agent \
               -o "${output_dir}/${apex}.httpx.txt" -oa \
       || warn "subfinder/httpx pipeline failed for ${apex}"
-  done < "${APEX_LIST_FILE}"
+  done < "${apex_file}"
   ok "[PHASE 8] subfinder/httpx results stored in ${output_dir}"
+}
+
+run_subfinder_pipeline(){
+  [[ -n "${APEX_LIST_FILE}" ]] || return 0
+  subfinder_httpx_loop "${APEX_LIST_FILE}" "manual apex file"
+}
+
+run_auto_apex_pipeline(){
+  if [[ ! -s "${AUTO_APEX_FILE}" ]]; then
+    info "[PHASE 8] No auto-discovered apex list yet; skipping automatic subfinder/httpx run."
+    return 0
+  fi
+  subfinder_httpx_loop "${AUTO_APEX_FILE}" "auto-discovered apex list"
 }
 
 # ---------- Phase 9: SpiderFoot HX ----------
@@ -828,6 +916,7 @@ consolidate_assets(){
 
   [[ -s "${ALL_ASNS_FILE}" ]] && cp "${ALL_ASNS_FILE}" "${REPORTS_DIR}/asns.txt"
   [[ -s "${ALL_PREFIXES_FILE}" ]] && cp "${ALL_PREFIXES_FILE}" "${REPORTS_DIR}/prefixes.txt"
+  [[ -s "${AUTO_APEX_FILE}" ]] && cp "${AUTO_APEX_FILE}" "${REPORTS_DIR}/apex-auto.txt"
 
   {
     echo "# Recon consolidation"
@@ -836,6 +925,7 @@ consolidate_assets(){
     echo "- IPs: ${ips_file}"
     echo "- ASNs: ${REPORTS_DIR}/asns.txt"
     echo "- Prefixes: ${REPORTS_DIR}/prefixes.txt"
+    echo "- Apex seeds: ${REPORTS_DIR}/apex-auto.txt"
     echo "- Shodan cheat sheets: ${SHODAN_DIR}"
     echo "- SpiderFoot plan: ${SPIDERFOOT_DIR}/${TARGET_DOMAIN}.spiderfoot-plan.md"
   } > "${REPORTS_DIR}/README.txt"
@@ -953,6 +1043,7 @@ emit_auto_shodan_queries
 plan_spiderfoot_osint
 run_subfinder_pipeline
 auto_process_sni_outputs
+run_auto_apex_pipeline
 
 consolidate_assets
 print_summary

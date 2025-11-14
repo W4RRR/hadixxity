@@ -14,7 +14,7 @@ H   H   A   A  DDDD   III  XXXXX  XXXXX  III    T      Y
 - Opinionated 10-phase flow: corporate intel → WHOIS/DNS/CT → ASN/BGP → cloud → Shodan → SNI parsing → SpiderFoot HX → consolidation.
 - Multi-domain aware runs (repeat `-d`) with automatic IP harvesting and BGP/ARIN pivots (BGPView API + bgp.he.net links).
 - Hurricane Electric “Network Tools” style summaries (DMARC/SPF/DKIM/BIMI, reverse IP, HTTP headers) saved per domain.
-- Optional apex pipeline (`-A apex.txt`) that replays the subfinder → httpx loop from the Modern Recon slides.
+- Automatic apex harvesting (CT, SNI, MX) feeding an optional subfinder → httpx loop; you can still hand a custom list via `-A`.
 - Aggregated Shodan helpers: cheat sheet, per-domain CLI exports + auto-generated `asn:` / `net:` queries from discovered data.
 - Config file loader (`.hadixxity.env`) for API keys (Shodan, SpiderFoot HX, SecurityTrails, Censys, ...).
 - ASCII art banner so you remember you're in Hadixxity land.
@@ -36,7 +36,7 @@ Copy `config.env.example` to `.hadixxity.env`, populate the values you need, and
 ```bash
 cp config.env.example .hadixxity.env          # put your API keys here
 chmod +x hadixxity.sh
-./hadixxity.sh -d target.com -d target.org -n "Target Corp" -S -C -X -A fisAPEXES
+./hadixxity.sh -d target.com -d target.org -n "Target Corp" -S -C -X
 ```
 
 Key flags:
@@ -44,7 +44,7 @@ Key flags:
 - `-C` downloads & parses AWS IP ranges
 - `-X` drops a SpiderFoot HX action plan
 - `-f` points to a custom env file with secrets
-- `-A` feeds a file with apex domains into the subfinder → httpx loop described in the PDF
+- `-A` feeds *your* file with apex domains into the subfinder → httpx loop described in the PDF (auto mode runs even sin este flag)
 
 ### Output Layout
 ```
@@ -59,7 +59,7 @@ recon-target.com/
 ├─ shodan/        # CLI exports + cheat sheet + aggregated asn/net queries
 ├─ sni/           # drop TLS/SNI dumps here for parsing
 ├─ spiderfoot/    # HX plan + exports placeholder
-├─ reports/       # consolidated domains / subdomains / IPs / ASNs / prefixes
+├─ reports/       # consolidated domains / subdomains / IPs / ASNs / prefixes / apex-auto
 └─ notes/         # free-form notes + `apex-httpx/` if you pass `-A`
 ```
 
@@ -75,7 +75,9 @@ recon-target.com/
 
 ### Apex recon loop (subfinder + httpx)
 - Provide `-A fisAPEXES` (or any file with one apex per line) to replay the `subfinder -d ... | httpx ...` loop shown in the PDF.
-- Results land in `notes/apex-httpx/<apex>.httpx.txt` with the exact switches from the slide (status code, title, content length, ASN, geolocation, multi-port probing, random UA, etc.).
+- Even sin `-A`, Hadixxity construye `meta/apex-auto.txt` con apex descubiertos vía CT/SNI/MX (ignorando proveedores comunes) y ejecuta la pipeline automáticamente.
+- Resultados (manual o auto) aterrizan en `notes/apex-httpx/<apex>.httpx.txt` con los mismos switches del slide (status code, title, content length, ASN, geolocalización, multi-puerto, random UA, etc.).
+- El fichero `reports/apex-auto.txt` conserva la lista usada para que puedas revisarla / depurarla.
 
 ### Shodan automation
 - `shodan/<domain>.*.txt` contains the raw CLI exports (certificate CN, hostname search, org pivot, HTTP stack, RDP).
