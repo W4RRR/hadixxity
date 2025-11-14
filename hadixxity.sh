@@ -190,6 +190,20 @@ shodan_search(){
   shodan search "$@"
 }
 
+shodan_run(){
+  local outfile="$1"; shift
+  local label="$1"; shift
+  local errfile
+  errfile=$(mktemp)
+  if ! shodan_search "$@" > "${outfile}" 2> "${errfile}"; then
+    local err_msg
+    err_msg=$(sed -n '1p' "${errfile}")
+    warn "Shodan query (${label}) failed: ${err_msg:-unknown error}"
+    rm -f "${outfile}"
+  fi
+  rm -f "${errfile}"
+}
+
 derive_apex(){
   local host="${1,,}"
   host="${host#.}"
@@ -789,18 +803,18 @@ recon_shodan(){
   local q_http="(ssl.cert.subject:\"${domain}\" OR hostname:\"${domain}\") port:80,443,8080,8443"
   local q_rdp="(ssl.cert.subject:\"${domain}\" OR hostname:\"${domain}\") port:3389"
 
-  shodan_search --fields ip_str,port,org,hostnames "${q1}" \
-    > "${SHODAN_DIR}/${domain}.ssl-subject.txt" 2>&1 || warn "Shodan query ssl-subject failed for ${domain}"
-  shodan_search --fields ip_str,port,org,hostnames "${q2}" \
-    > "${SHODAN_DIR}/${domain}.hostname.txt" 2>&1 || warn "Shodan query hostname failed for ${domain}"
+  shodan_run "${SHODAN_DIR}/${domain}.ssl-subject.txt" "ssl-subject ${domain}" \
+    --fields ip_str,port,org,hostnames "${q1}"
+  shodan_run "${SHODAN_DIR}/${domain}.hostname.txt" "hostname ${domain}" \
+    --fields ip_str,port,org,hostnames "${q2}"
   if [[ -n "${q_org}" ]]; then
-    shodan_search --fields ip_str,port,org,hostnames "${q_org}" \
-      > "${SHODAN_DIR}/${domain}.org.txt" 2>&1 || warn "Shodan query org failed"
+    shodan_run "${SHODAN_DIR}/${domain}.org.txt" "org (${COMPANY_NAME})" \
+      --fields ip_str,port,org,hostnames "${q_org}"
   fi
-  shodan_search --fields ip_str,port,org,hostnames,title "${q_http}" \
-    > "${SHODAN_DIR}/${domain}.http-stack.txt" 2>&1 || warn "Shodan HTTP query failed for ${domain}"
-  shodan_search --fields ip_str,port,org,hostnames,os "${q_rdp}" \
-    > "${SHODAN_DIR}/${domain}.rdp.txt" 2>&1 || warn "Shodan RDP query failed for ${domain}"
+  shodan_run "${SHODAN_DIR}/${domain}.http-stack.txt" "HTTP stack ${domain}" \
+    --fields ip_str,port,org,hostnames,title "${q_http}"
+  shodan_run "${SHODAN_DIR}/${domain}.rdp.txt" "RDP ${domain}" \
+    --fields ip_str,port,org,hostnames,os "${q_rdp}"
 
   generate_shodan_playbook "${domain}"
   ok "[PHASE 7] Shodan outputs ready for ${domain}."
@@ -903,17 +917,25 @@ subfinder_httpx_loop(){
     [[ -z "$apex" ]] && continue
     info "  [APEX] ${apex}"
     apply_delay
-    local subfinder_cmd=(subfinder -d "${apex}" -all)
+    local pd_hint
     if [[ -n "${PROJECTDISCOVERY_API_KEY}" ]]; then
-      subfinder_cmd=(env PDCP_API_KEY="${PROJECTDISCOVERY_API_KEY}" "${subfinder_cmd[@]}")
+      pd_hint="Verify your ProjectDiscovery key has asnmap access or try regenerating it."
+    else
+      pd_hint="Set PROJECTDISCOVERY_API_KEY in .hadixxity.env to unlock ASNmap/sources."
     fi
-    "${subfinder_cmd[@]}" 2>/dev/null \
-      | httpx -status-code -title -content-length -web-server -asn -location \
+    if ! (
+      if [[ -n "${PROJECTDISCOVERY_API_KEY}" ]]; then
+        env PDCP_API_KEY="${PROJECTDISCOVERY_API_KEY}" subfinder -d "${apex}" -all
+      else
+        subfinder -d "${apex}" -all
+      fi
+    ) | httpx -status-code -title -content-length -web-server -asn -location \
               -no-color -follow-redirects -t 15 \
               -ports 80,8080,443,8443,4443,8888 \
               -no-fallback -probe-all-ips -random-agent \
-              -o "${output_dir}/${apex}.httpx.txt" -oa \
-      || warn "subfinder/httpx pipeline failed for ${apex}"
+              -o "${output_dir}/${apex}.httpx.txt" -oa; then
+      warn "[PHASE 8] subfinder/httpx pipeline failed for ${apex}. ${pd_hint}"
+    fi
   done < "${apex_file}"
   ok "[PHASE 8] subfinder/httpx results stored in ${output_dir}"
 }
@@ -1161,6 +1183,15 @@ TARGET_DOMAIN="${TARGET_DOMAINS[0]}"
 # ---------- Runtime ----------
 load_config_file "${CONFIG_FILE}"
 
+[[ -n "${SHODAN_API_KEY:-}" ]] && export SHODAN_API_KEY
+if [[ -n "${PROJECTDISCOVERY_API_KEY:-}" ]]; then
+  export PROJECTDISCOVERY_API_KEY
+  export PDCP_API_KEY="${PROJECTDISCOVERY_API_KEY}"
+  export ASNMAP_API_KEY="${PROJECTDISCOVERY_API_KEY}"
+  export HTTPX_API_KEY="${PROJECTDISCOVERY_API_KEY}"
+else
+  warn "PROJECTDISCOVERY_API_KEY not set; subfinder/httpx may skip certain modules (asnmap, etc.)."
+fi
 [[ -z "${CUSTOM_USER_AGENT}" && -n "${HADIXXITY_USER_AGENT:-}" ]] && CUSTOM_USER_AGENT="${HADIXXITY_USER_AGENT}"
 init_user_agent
 

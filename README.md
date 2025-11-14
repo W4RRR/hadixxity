@@ -31,6 +31,7 @@ Hadixxity condenses Jason Haddix's *Modern Recon* techniques into a single autom
 - `SECURITYTRAILS_API_KEY` – ready for DNS/history enrichment if you extend the script
 - `CENSYS_API_ID` / `CENSYS_API_SECRET` – wired for future Censys modules
 - `PROJECTDISCOVERY_API_KEY` – unlocks all sources in the `subfinder`/`httpx` pipelines (auto-apex + manual `-A`)
+- Recuerda ejecutar `shodan init "$SHODAN_API_KEY"` al menos una vez para que la CLI quede autenticada.
 
 Copy `config.env.example` to `.hadixxity.env`, populate the values you need, and the script will auto-source it on launch.
 
@@ -45,6 +46,7 @@ O bien, usa el script auxiliar para preparar todo tras clonar el repositorio:
 ```bash
 ./install.sh
 # edita .hadixxity.env con tus claves y ejecuta hadixxity.sh
+# (opcional) shodan init "$SHODAN_API_KEY"  # si la CLI aún no tiene API key
 ```
 
 ### User-Agent & delay controls
