@@ -1206,8 +1206,8 @@ print_summary(){
   echo "  ${REPORTS_DIR}    -> Consolidated lists"
   echo
   echo "Next steps:"
-  echo "  - Revisa reports/subdomains-resolved.tsv y los Shodan exports para priorizar objetivos."
-  echo "  - Alimenta tu stack activo (nmap/httpx/ffuf) o utiliza --httpx-final para obtener banners básicos automáticamente."
+  echo "  - Review reports/subdomains-resolved.tsv and Shodan exports to prioritize targets."
+  echo "  - Feed your active stack (nmap/httpx/ffuf) or use --httpx-final to get basic banners automatically."
   echo
   local sub_count=0
   local ip_count=0
@@ -1260,6 +1260,36 @@ print_summary(){
     echo "- Delay mode:            random ${DELAY_MIN}-${DELAY_MAX}s"
   fi
   echo
+  
+  # Show subdomains with resolved IPs
+  local resolved_file="${REPORTS_DIR}/subdomains-resolved.tsv"
+  if [[ -f "${resolved_file}" && -s "${resolved_file}" ]]; then
+    echo -e "${C_CYN}--- Subdomains with IPs ---${C_RST}"
+    # Skip header line and group by subdomain
+    declare -A subdomain_ips=()
+    while IFS=$'\t' read -r subdomain record value; do
+      [[ "$subdomain" == "subdomain" ]] && continue  # Skip header
+      [[ -z "$subdomain" || "$value" == "-" ]] && continue
+      if [[ -z "${subdomain_ips[$subdomain]:-}" ]]; then
+        subdomain_ips["$subdomain"]="$value"
+      else
+        subdomain_ips["$subdomain"]="${subdomain_ips[$subdomain]}, $value"
+      fi
+    done < "${resolved_file}"
+    
+    # Display up to 20 subdomains (to avoid overwhelming output)
+    local displayed=0
+    for subdomain in "${!subdomain_ips[@]}"; do
+      if (( displayed < 20 )); then
+        echo "  ${subdomain} -> ${subdomain_ips[$subdomain]}"
+        ((displayed++))
+      fi
+    done
+    if (( ${#subdomain_ips[@]} > 20 )); then
+      echo "  ... and more... see: ${REPORTS_DIR}"
+    fi
+    echo
+  fi
 }
 
 # ---------- Arg parsing ----------
